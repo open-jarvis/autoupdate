@@ -4,6 +4,7 @@ Copyright (c) 2021 Philipp Scheer
 
 
 import os
+import sys
 import json
 import time
 from jarvis import Logger, Config, MQTT
@@ -13,20 +14,29 @@ from processes import downloader
 from processes import installer
 
 
-DATASERVER = "data.jarvis.philippscheer.com"
+# initialize jarvis classes
+logger = Logger("updater")
+cnf = Config()
+mqtt = MQTT(client_id="updater")
+
+
+# initially set data server
+if cnf.get("update-server", None) is None:
+    cnf.set("update-server", "data.jarvis.philippscheer.com")
+
+
+# define constants
+DATASERVER = cnf.get("update-server", "data.jarvis.philippscheer.com")
 TO_CHECK = [
-    # ACTION:       if below                                    >       this               ;       then        download this                                   and install here
-    [  f"http://{DATASERVER}/web/version"     ,  "/jarvis/web/version"     ,  f"http://{DATASERVER}/web-latest.tar.gz"     , "/jarvis/web"     ],
-    [  f"http://{DATASERVER}/server/version"  ,  "/jarvis/server/version"  ,  f"http://{DATASERVER}/server-latest.tar.gz"  , "/jarvis/server"  ]
+    # ACTION:       if below                        >   this                            ;  then download this                               ; and install here      ; automatically install?
+    [  f"http://{DATASERVER}/web/version"           ,   "/jarvis/web/version"           ,  f"http://{DATASERVER}/web-latest.tar.gz"         , "/jarvis/web"         , False ],
+    [  f"http://{DATASERVER}/server/version"        ,   "/jarvis/server/version"        ,  f"http://{DATASERVER}/server-latest.tar.gz"      , "/jarvis/server"      , False ],
+    [  f"http://{DATASERVER}/autoupdate/version"    ,   "/jarvis/autoupdate/version"    ,  f"http://{DATASERVER}/autoupdate-latest.tar.gz"  , "/jarvis/autoupdate"  , True  ]
 ]
 
 DOWNLOADS_FOLDER = "/jarvis/downloads"
 POLL_INTERVAL = 60 * 60 * 1 # CHECK EVERY HOUR FOR UPDATE
 CURRENT_ACTION = "idle"
-
-logger = Logger("updater")
-cnf = Config()
-mqtt = MQTT(client_id="updater")
 
 
 def download_pending():
@@ -49,6 +59,9 @@ def poll(download=False, install=False):
     logger.i("polling", f"polling for updates from server {DATASERVER}")
     at_least_one_update = False
     for el in TO_CHECK:
+        if el[4]:
+            download = True
+            install = True
         latest_file_name = el[2].split("/")[-1]
         downloaded_file_path = DOWNLOADS_FOLDER + "/" + latest_file_name
         local_installation_path = el[3]
@@ -73,6 +86,11 @@ def poll(download=False, install=False):
                 installer.install(downloaded_file_path, local_installation_path)
                 logger.i("install", f"installed update v{remote}")
                 mqtt.publish("jarvis/update/status", json.dumps({"type": "installation", "action": "finished", "version": {"current": str(remote), "remote": str(remote) } }))
+                if "autoupdate" in local_installation_path:
+                    # automatically restart own application
+                    os.execv(sys.executable, ['python3'] + [sys.argv[0]])
+                else:
+                    mqtt.publish("jarvis/backend/restart", json.dumps({}))
                 CURRENT_ACTION = "idle"
     if not at_least_one_update:
         logger.i("polling", f"no update found on server {DATASERVER}")
